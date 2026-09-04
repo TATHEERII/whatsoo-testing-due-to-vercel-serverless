@@ -1,8 +1,9 @@
 {
-    "crons": [
-        {
-            "path": "/api/cron/process-jobs?token=${CRON_SECRET_TOKEN}",
-            "schedule": "*/2 * * * *"
-        }
-    ]
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "crons": [
+    {
+      "path": "/api/cron/process-jobs",
+      "schedule": "*/2 * * * *"
+    }
+  ]
 }
