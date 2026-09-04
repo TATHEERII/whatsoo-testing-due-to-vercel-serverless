@@ -281,11 +281,7 @@ function main(): void {
 process.on("unhandledRejection", (reason) => {
   console.error("[engine] Unhandled rejection:", reason);
   if (reason instanceof Error && reason.message?.includes("timed out")) {
-    if (engine.ready) {
-      engine.ready = false;
-      engine.lastError = reason.message;
-      engine.emit("status_error", reason.message);
-    }
+    engine.markUnhealthy(reason.message);
   }
 });
 

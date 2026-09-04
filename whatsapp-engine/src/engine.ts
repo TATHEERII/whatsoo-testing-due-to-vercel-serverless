@@ -592,8 +592,15 @@ export class WhatsAppEngine extends EventEmitter {
     }, delay);
   }
 
+  markUnhealthy(error: string): void {
+    if (this.ready) {
+      this.ready = false;
+      this.lastError = error;
+      this.emit("status_error", error);
+    }
+  }
+
   async disconnect(clearSession: boolean = false): Promise<void> {
-    // Clear any pending reconnect timer
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;

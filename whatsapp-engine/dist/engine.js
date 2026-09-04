@@ -42,6 +42,7 @@ exports.obfuscateLine = obfuscateLine;
 const node_events_1 = require("node:events");
 const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
+const dotObfuscation_1 = require("./dotObfuscation");
 exports.defaultObfuscationOptions = {
     enabled: true,
     dotReplaceRatio: 0.3,
@@ -110,6 +111,7 @@ class WhatsAppEngine extends node_events_1.EventEmitter {
     initializing = false;
     lastQr = null;
     lastError = null;
+    lastState = null;
     obfuscationOptions;
     wapi = null;
     initPromise = null;
@@ -170,6 +172,7 @@ class WhatsAppEngine extends node_events_1.EventEmitter {
             const lib = await this.loadLib();
             const defaultPuppeteerOptions = {
                 headless: true,
+                protocolTimeout: 60000,
                 args: [
                     "--no-sandbox",
                     "--disable-setuid-sandbox",
@@ -194,7 +197,6 @@ class WhatsAppEngine extends node_events_1.EventEmitter {
                 puppeteer: puppeteerOptions ?? defaultPuppeteerOptions,
             });
             // Track connection state for debugging and monitoring
-            let lastConnectionState = null;
             this.client.on("qr", (qr) => {
                 this.ready = false;
                 this.lastQr = qr;
@@ -238,9 +240,9 @@ class WhatsAppEngine extends node_events_1.EventEmitter {
             // Monitor connection state changes for debugging
             this.client.on("change_state", (state) => {
                 const stateStr = typeof state === "string" ? state : String(state);
-                if (lastConnectionState !== stateStr) {
-                    console.log(`[engine] Connection state changed: ${lastConnectionState} -> ${stateStr}`);
-                    lastConnectionState = stateStr;
+                if (this.lastState !== stateStr) {
+                    console.log(`[engine] Connection state changed: ${this.lastState} -> ${stateStr}`);
+                    this.lastState = stateStr;
                 }
             });
             // Monitor loading screen changes (helpful for debugging connection issues)
@@ -301,11 +303,20 @@ class WhatsAppEngine extends node_events_1.EventEmitter {
             return { state: "UNLAUNCHED", ready: false, qr: null, phoneNumber: null, error: null };
         }
         let state = "UNKNOWN";
-        try {
-            state = String(await this.client.getState());
+        if (this.lastState) {
+            state = this.lastState;
         }
-        catch {
-            state = "UNKNOWN";
+        else {
+            try {
+                const withTimeout = Promise.race([
+                    this.client.getState(),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000)),
+                ]);
+                state = String(await withTimeout);
+            }
+            catch {
+                state = "UNKNOWN";
+            }
         }
         const isReady = this.ready;
         const qr = isReady ? null : this.lastQr;
@@ -403,6 +414,11 @@ class WhatsAppEngine extends node_events_1.EventEmitter {
     obfuscateMessage(message) {
         return obfuscateText(message, this.obfuscationOptions);
     }
+    SEND_TIMEOUT_MS = 45000;
+    withTimeout(p, ms, label) {
+        const timer = new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms));
+        return Promise.race([p, timer]);
+    }
     async sendText(to, text) {
         if (!this.client) {
             throw new Error("WhatsApp client is not initialized");
@@ -414,7 +430,16 @@ class WhatsAppEngine extends node_events_1.EventEmitter {
             ? to
             : `${to.replace(/[\+\s\-]/g, "")}@s.whatsapp.net`;
         const obfuscated = this.obfuscateMessage(text);
-        await this.client.sendMessage(chatId, obfuscated);
+        const withDots = (0, dotObfuscation_1.addDots)(obfuscated);
+        try {
+            await this.withTimeout(this.client.sendMessage(chatId, withDots), this.SEND_TIMEOUT_MS, "sendText");
+        }
+        catch (err) {
+            this.ready = false;
+            this.lastError = err instanceof Error ? err.message : "sendText failed";
+            this.emit("status_error", this.lastError);
+            throw err;
+        }
     }
     async sendImage(to, filePath, caption) {
         if (!this.client) {
@@ -434,7 +459,15 @@ class WhatsAppEngine extends node_events_1.EventEmitter {
         if (caption) {
             options.caption = this.obfuscateMessage(caption);
         }
-        await this.client.sendMessage(chatId, media, options);
+        try {
+            await this.withTimeout(this.client.sendMessage(chatId, media, options), this.SEND_TIMEOUT_MS, "sendImage");
+        }
+        catch (err) {
+            this.ready = false;
+            this.lastError = err instanceof Error ? err.message : "sendImage failed";
+            this.emit("status_error", this.lastError);
+            throw err;
+        }
     }
     async sendVideo(to, filePath, caption) {
         if (!this.client) {
@@ -456,7 +489,15 @@ class WhatsAppEngine extends node_events_1.EventEmitter {
         if (caption) {
             options.caption = this.obfuscateMessage(caption);
         }
-        await this.client.sendMessage(chatId, media, options);
+        try {
+            await this.withTimeout(this.client.sendMessage(chatId, media, options), this.SEND_TIMEOUT_MS, "sendVideo");
+        }
+        catch (err) {
+            this.ready = false;
+            this.lastError = err instanceof Error ? err.message : "sendVideo failed";
+            this.emit("status_error", this.lastError);
+            throw err;
+        }
     }
     async sendCombined(to, filePath, text, mediaType) {
         if (mediaType === "image") {
@@ -491,8 +532,14 @@ class WhatsAppEngine extends node_events_1.EventEmitter {
             });
         }, delay);
     }
+    markUnhealthy(error) {
+        if (this.ready) {
+            this.ready = false;
+            this.lastError = error;
+            this.emit("status_error", error);
+        }
+    }
     async disconnect(clearSession = false) {
-        // Clear any pending reconnect timer
         if (this.reconnectTimer) {
             clearTimeout(this.reconnectTimer);
             this.reconnectTimer = null;
