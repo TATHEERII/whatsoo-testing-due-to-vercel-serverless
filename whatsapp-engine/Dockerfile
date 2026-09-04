@@ -1,6 +1,7 @@
 # --- Stage 1: build ---
 FROM node:22-bookworm-slim AS build
 WORKDIR /app
+# Force rebuild: protocolTimeout fix deployment
 COPY package.json package-lock.json* ./
 RUN npm install --no-audit --no-fund
 COPY tsconfig.json ./
